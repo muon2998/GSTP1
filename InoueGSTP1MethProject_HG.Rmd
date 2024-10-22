@@ -1,0 +1,514 @@
+---
+title: "Inoue GSTP1 Methylation Project"
+author: "Harshi Gupta"
+date: "Last compiled on `r format(Sys.time(), '%B %d, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Load the necessary libraries.**
+```{r Libraries, message=FALSE }
+library(readxl)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+library(tidyverse)
+
+```
+***
+# Import Data
+***
+
+1. Import data (Ultimate_merged_Dataframe.xlsx) that contain sequencing, patient, pathology, and methylation information and do some clean up. This file was generated from the following files:
+  + pythonLabNotebook.py
+  + generate_sampleMaps.py
+  + Penultimate_InoueFRAME.xlsx
+  + InoueDataFrame.xls
+  + manual_tissuedx_corrections.xlsx
+  + manual_sequence_corrections.fasta
+
+```{r ImportData}
+methylationDataFrame <- read_excel("Ultimate_merged_GSTP1Dataframe.xlsx", col_types = c("text", "text", "numeric", "numeric", "text", "numeric", "numeric", "numeric", "text", "text", "numeric", "text", "text", "text", "text", "text", "text", "numeric", "numeric", "numeric", "numeric", "text", "text", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric"))
+
+
+# Drop the "Identifier" column as this was created for the Python script, but contains no unique information.
+methylationDataFrame$Identifier <- NULL
+colnames(methylationDataFrame)
+# Rename column names beginning with a number, #, or % because R doesn't handle these well.
+colnames(methylationDataFrame)[29:67] <- paste("CpG", colnames(methylationDataFrame[,29:67]), sep = "_")
+
+methylationDataFrame <- methylationDataFrame %>%
+  rename(
+    Bs_conversion = `%Bs-conversion`,
+    Percent_Align = `%Alignment`,
+    Percent_Methylation = `%Methylation`,
+    CpGs_in_ref = "#CpGs in ref",
+    CpGs_in_clone = "#CpGs in clone"
+  )
+
+
+
+# Replace the -1 values with NA
+methylationDataFrame[methylationDataFrame == -1] <- NA
+
+
+# str(methylationDataFrame)
+```
+***
+# Overview Summary of the Data
+***
+**Note that in these data, the TissueDxNum provides a unique identifier for each tissue region that was analyzed, and has multiple clones for each of these regions. The specimenID provides a unique identifier for each subject that was analyzed.**
+
+1. The number of Subjects in the study is:
+```{r}
+n_distinct(methylationDataFrame$specimenID)
+```
+
+
+2. The number of tissue regions assessed overall in the study is:
+```{r}
+n_distinct(methylationDataFrame$TissueDxNum)
+```
+
+
+3. The total number of clones analyzed by bisulfite sequencing is:
+```{r}
+length(methylationDataFrame$CloneNum)
+```
+
+
+4. The breakdown of these tissue regions by diagnosis and number of clones is:
+```{r message=FALSE}
+methylationDataFrame %>% group_by(TissueType) %>%
+  summarize(NumSubjects = n_distinct(specimenID), NumTissues = n_distinct(TissueDxNum), NumClones = n())
+
+```
+
+5. Put in a new column that contains the number of methylated CpGs in each row and a column that contains the number of informative CpGs assessed for each row.
++ Methylated CpG: Output from DNAMethylMap is 1.
++ Informative CpG: Output from DNAMethylMap is either 0 or 1, but not -1 (i.e. NA).
++ mScore: number of methylated CpGs is Negative (0-3), Mild (4-9), Mod (10-19), High (20-39)
+
+```{r}
+methylationDataFrame <- methylationDataFrame %>%
+  mutate(numCpGmeth = rowSums(.[29:67], na.rm = TRUE),
+         numCpGinform = rowSums(!is.na(.[29:67])),
+         percentMeth = numCpGmeth/numCpGinform)
+
+methylationDataFrame$mScore = as.numeric(cut(methylationDataFrame$percentMeth,c(-0.01,0.10,0.25,0.50,1), labels = c(1,2,3,4)))
+
+summary(methylationDataFrame)
+write_excel_csv(methylationDataFrame, file = "methylationDataFrame.csv")
+```
+
+6. Create a summary table that contains the overall average methylation across all informative CpGs and clones for each of the 103 tissue regions that were analyzed.
+
+```{r}
+MethSummaryData <- methylationDataFrame %>%
+  group_by(specimenID, TissueType, TissueDxNum) %>%
+  summarise(
+    NumClones = length(TissueDxNum),
+    MeanMeth = sum(numCpGmeth) / sum(numCpGinform),
+    maxMscore = max(mScore),
+    avgMscore = mean(mScore),
+    minBSConvert = min(Bs_conversion),
+    MeanAlign = mean(Percent_Align),
+    maxEvalue = max(`E-value`),
+    CAinSlide = CAinSlide[1],
+    NextTo = NextTo[1],
+    Merging = Merging[1],
+    Capture = Capture[1],
+    Frozen = Frozen[1],
+    DNA_nanograms = DNA_nanograms[1],
+    PrimaryGrade = PrimaryGrade[1],
+    SecondaryGrade = SecondaryGrade[1],
+    GleasonSum = GleasonSum[1],
+    Comment = Comment[1],
+    Vasan_Comments = Vasan_Comments[1]
+  )
+
+# MethSummaryData
+summary(MethSummaryData)
+```
+```{r}
+#multiplot function
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+```
+
+7a. Plot average methylation by each tissue type as well as percent methylation for clones.
+```{r}
+#install.packages("ggplot2")
+library("ggplot2")
+library(RColorBrewer)
+library(ggsignif)
+
+##Prepare a function to set the whiskers of a boxplot to the full range.
+
+f <- function(x) {
+  r <- quantile(x, probs = c(0, 0.25, 0.5, 0.75, 1))
+  names(r) <- c("ymin", "lower", "middle", "upper", "ymax")
+  r
+}
+
+
+
+## Create the stripchart and then do multiple formatting things.
+## Format the order of x-axis, add custom labels, remove legend.
+## Format the X- and Y-axis label font size and location, x- and y-axis tick label font size, and adjust the plot margins so everything is visible.
+par(mfrow = c(1, 2))
+
+plotMeanMeth <- ggplot(MethSummaryData, aes(x=TissueType, y=MeanMeth)) +
+  scale_x_discrete(name = "Tissue Region Type",      labels=c("Normal","Atrophy","PIN","Cancer"), limits=c("normal","atrophy","PIN","cancer")) +
+  scale_y_continuous(name = "Average Methylation") +
+  ggtitle("Average Methylation in Tissues") + 
+  stat_summary(fun.data = f, geom="boxplot", aes(color=TissueType, width=0.6)) +
+  geom_jitter(position=position_jitter(0.15), aes(shape=TissueType, fill=TissueType), colour="black", size=3, stroke=0.3) +
+  theme_classic() +
+  scale_shape_manual(values=c(21,22,23,24)) +
+  scale_color_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  scale_fill_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  theme(legend.position="none") +
+  theme(axis.title.x = element_text(size=20, vjust=-3), axis.title.y = element_text(size=20, vjust=3), axis.text.x = element_text(size=14), axis.text.y = element_text(size=14), plot.title = element_text(size=24, face = "bold"), plot.margin = unit(c(1,3,1,3), "cm"))
+
+plotMeanMeth
+
+plotMeanMeth_Clones <- ggplot(methylationDataFrame, aes(x=TissueType, y=percentMeth)) + 
+  scale_x_discrete(name = "Tissue Region Type",      labels=c("Normal","Atrophy","PIN","Cancer"), limits=c("normal","atrophy","PIN","cancer")) +
+  scale_y_continuous(name = "Percent Methylation") +
+  ggtitle("Average Methylation in Clones") + 
+  stat_summary(fun.data = f, geom="boxplot", aes(color=TissueType, width=0.6)) +
+  geom_jitter(position=position_jitter(0.15), aes(shape=TissueType, fill=TissueType), colour="black", size=3, stroke=0.3) +
+  theme_classic() +
+  scale_shape_manual(values=c(21,22,23,24)) +
+  scale_color_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  scale_fill_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  theme(legend.position="none") +
+  theme(axis.title.x = element_text(size=20, vjust=-3), axis.title.y = element_text(size=20, vjust=3), axis.text.x = element_text(size=14), axis.text.y = element_text(size=14), plot.title = element_text(size=24, face = "bold"), plot.margin = unit(c(1,3,1,3), "cm"))
+
+plotMeanMeth_Clones
+
+pdf("plotMeanMeath.pdf")
+plotMeanMeth
+plotMeanMeth_Clones
+dev.off()
+
+```
+
+7c. Plot average mScore by each tissue type where each point is a specific tissue.
+```{r}
+##Prepare a function to set the whiskers of a boxplot to the full range.
+
+f <- function(x) {
+  r <- quantile(x, probs = c(0, 0.25, 0.5, 0.75, 1))
+  names(r) <- c("ymin", "lower", "middle", "upper", "ymax")
+  r
+}
+
+## Create the stripchart and then do multiple formatting things.
+## Format the order of x-axis, add custom labels, remove legend.
+## Format the X- and Y-axis label font size and location, x- and y-axis tick label font size, and adjust the plot margins so everything is visible.
+
+plotmScoreTissue <- ggplot(MethSummaryData, aes(x=TissueType, y=avgMscore)) + 
+  scale_x_discrete(name = "Tissue Region Type",      labels=c("Normal","Atrophy","PIN","Cancer"), limits=c("normal","atrophy","PIN","cancer")) +
+  scale_y_continuous(name = "Average M-score") +
+  ggtitle("Average M-Score in Tissues") + 
+  stat_summary(fun.data = f, geom="boxplot", aes(color=TissueType, width=0.6)) +
+  geom_jitter(position=position_jitter(0.15), aes(shape=TissueType, fill=TissueType), colour="black", size=3, stroke=0.3) +
+  theme_classic() +
+  scale_shape_manual(values=c(21,22,23,24)) +
+  scale_color_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  scale_fill_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  theme(legend.position="none") +
+  theme(axis.title.x = element_text(size=20, vjust=-3), axis.title.y = element_text(size=20, vjust=3), axis.text.x = element_text(size=14), axis.text.y = element_text(size=14), plot.title = element_text(size=24, face = "bold"), plot.margin = unit(c(1,3,1,3), "cm"))
+
+plotmScoreTissue
+
+
+plotmScoreClones <- ggplot(methylationDataFrame, aes(x=TissueType, y=mScore)) + 
+  scale_x_discrete(name = "Tissue Region Type",      labels=c("Normal","Atrophy","PIN","Cancer"), limits=c("normal","atrophy","PIN","cancer")) +
+  scale_y_continuous(name = "M-score") +
+  ggtitle("M-Score in Clones") + 
+  stat_summary(fun.data = f, geom="boxplot", aes(color=TissueType, width=0.6)) +
+  geom_jitter(position=position_jitter(width = 0.3, height = 0.2), aes(shape=TissueType, fill=TissueType), colour="black", size=2, stroke=0.3) +
+  theme_classic() +
+  scale_shape_manual(values=c(21,22,23,24)) +
+  scale_color_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  scale_fill_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  theme(legend.position="none") +
+  theme(axis.title.x = element_text(size=20, vjust=-3), axis.title.y = element_text(size=20, vjust=3), axis.text.x = element_text(size=14), axis.text.y = element_text(size=14), plot.title = element_text(size=24, face = "bold"), plot.margin = unit(c(1,3,1,3), "cm"))
+
+plotmScoreClones
+
+pdf("plotmScore.pdf")
+plotmScoreTissue
+plotmScoreClones
+dev.off()
+
+
+```
+
+8. Now that we have made a nice visualization of the data, it is clear that the MeanMeth is changing with the TissueType. We should test this hypothesis formally and assess the significance using Anova.
+```{r}
+aov(MeanMeth ~ TissueType, data = MethSummaryData)
+summary(aov(MeanMeth ~ TissueType, data = MethSummaryData))
+
+### Setting up individual contrasts of PIN vs. each of the other types.
+MethSummaryData$TissueType = factor(MethSummaryData$TissueType, levels=c("normal","atrophy","PIN","cancer"))
+PIN_normal = c(-1, 0, 1, 0)
+PIN_atrophy = c(0, -1, 1, 0)
+PIN_cancer = c(0, 0, 1, -1)
+matriz = cbind(PIN_normal, PIN_atrophy, PIN_cancer)
+contrasts(MethSummaryData$TissueType) <- matriz
+CList = list("PIN-normal"=1, "PIN-atrophy"=2, "PIN-cancer"=3)
+model1 <- aov(MeanMeth ~ TissueType, data = MethSummaryData)
+summary.aov(model1, split=list(TissueType=CList))
+```
+
+As expected, the overall TissueType and contrasts for PIN vs. each of the other TissueTypes are all very significant.
+
+To make sure this is not due to making a false assumption that the data are from a normal distribution, we can carry out non-parametric tests also:
+
+```{r, warning=FALSE}
+"Astrophy vs. normal"
+wilcox.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("normal","atrophy"), ]) #This is the mann-whitney U test
+kruskal.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("normal","atrophy"), ]) #Kruskal Wallis test of one way anova by ranks
+
+"PIN vs. normal"
+wilcox.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("normal","PIN"), ]) #This is the mann-whitney U test
+kruskal.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("normal","PIN"), ]) #Kruskal Wallis test of one way anova by ranks
+
+"PIN vs. Atrophy"
+wilcox.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("atrophy","PIN"), ]) #This is the mann-whitney U test
+kruskal.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("atrophy","PIN"), ]) #Kruskal Wallis test of one way anova by ranks
+
+"PIN vs. cancer"
+wilcox.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("cancer","PIN"), ]) #This is the mann-whitney U test
+kruskal.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("cancer","PIN"), ]) #Kruskal Wallis test of one way anova by ranks
+
+"Cancer vs. normal"
+wilcox.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("normal","cancer"), ]) #This is the mann-whitney U test
+kruskal.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("normal","cancer"), ]) #Kruskal Wallis test of one way anova by ranks
+
+"Cancer vs. Atrophy"
+wilcox.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("atrophy","cancer"), ]) #This is the mann-whitney U test
+kruskal.test(MeanMeth ~ TissueType, data = MethSummaryData[MethSummaryData$TissueType==c("atrophy","cancer"), ]) #Kruskal Wallis test of one way anova by ranks
+```
+
+Note that although cancer vs. pin was significant in the ANOVA test, it was not significant in the nonparametric tests.
+
+Now we want to carry out various explorations of the average methylation data to see if there are other aspects to highlight before working on the phased methylation information.
+
+First lets check if GSTP1 methylation is associated with Gleason Score in these data.
+
+```{r, eval=FALSE}
+## Summarize the GleasonScore spectrum in the cancer tissues
+ddply(MethSummaryData[MethSummaryData$TissueType=="cancer",], c("TissueType","Comment"), summarise, N=length(Comment))
+
+## Now Summarise by Gleason Sum
+ddply(MethSummaryData[MethSummaryData$TissueType=="cancer",], c("TissueType","GleasonSum"), summarise, N=length(Comment))
+
+## Plot MeanMeth by Gleason Score
+ggplot(MethSummaryData[MethSummaryData$TissueType=="cancer",], aes(x=Comment, y=MeanMeth)) + geom_jitter(position=position_jitter(0.15), aes(colour=Comment))
+
+## Plot MeanMeth by Gleason Sum
+ggplot(MethSummaryData[MethSummaryData$TissueType=="cancer",], aes(x=GleasonSum, y=MeanMeth)) + geom_jitter(position=position_jitter(0.15), aes(colour=Comment))
+
+```
+
+Based on this exploration, there does not appear to be any association with Gleason Score, and certainly not enough sample size probably to know if any differences are signficant. Nonetheless, we can formalize this with some statistical testing of methylation in cancer regions from high (GS >= 7) vs. (GS <= 6).
+
+```{r}
+## First set up a new vector that consolidates the Gleason sum into (GS > 6, "High") and (GS < 7, "Low").
+
+cancerMethSummary <- MethSummaryData[MethSummaryData$TissueType=="cancer",]
+cancerMethSummary$GleasonHiLow <- factor(cancerMethSummary$GleasonSum)
+levels(cancerMethSummary$GleasonHiLow)
+levels(cancerMethSummary$GleasonHiLow) <- c("Low", "Low", "High", "High")
+
+#Now run a one-way Anova to test whether the means of MeanMeth is different between "High" and "Low"
+
+aov(MeanMeth ~ GleasonHiLow, data = cancerMethSummary)
+summary(aov(MeanMeth ~ GleasonHiLow, data = cancerMethSummary))
+
+```
+
+Since the p-value, denoted by the column "Pr(>F)" is not significant, there is no association. We can also try a non-parametric test, such as the mann-whitney U test.
+
+```{r}
+wilcox.test(MeanMeth ~ GleasonHiLow, data = cancerMethSummary) #This is the mann-whitney U test
+kruskal.test(MeanMeth ~ GleasonHiLow, data = cancerMethSummary) #Kruskal Wallis test of one way anova by ranks
+```
+
+So no significant association with Grade.
+
+Next, let's check if PIN next to or merging with cancer have any association with mean methylation.
+
+```{r, eval=FALSE}
+## Turn the CAinSlide, NextTo and Merging vectors into factors in the dataframe.
+MethSummaryData$CAinSlide <- factor(MethSummaryData$CAinSlide)
+MethSummaryData$NextTo <- factor(MethSummaryData$NextTo)
+MethSummaryData$Merging <- factor(MethSummaryData$Merging)
+MethSummaryData$CAinSlide
+MethSummaryData$NextTo
+MethSummaryData$Merging
+
+##The Merging has too many levels, probably worth consolidating so that CA = CA or CA_small or YES; PIN = Focal_HGPIN or HGPIN or LGPIN; NO = NO
+levels(MethSummaryData$Merging) <- c("CA", "CA", "PIN", "PIN", "PIN", "NO", "CA")
+MethSummaryData$Merging
+
+## Summarize the PIN by CAinSlide, near or merging with cancer
+ddply(MethSummaryData[MethSummaryData$TissueType=="PIN",], c("TissueType","CAinSlide","NextTo","Merging"), summarise, N=length(Merging))
+
+## Make summary plots of these parameters and test associations
+ggplot(MethSummaryData[MethSummaryData$TissueType=="PIN",], aes(x=Merging, y=MeanMeth)) + geom_jitter(position=position_jitter(0.15), aes(colour=Merging))
+
+ggplot(MethSummaryData[MethSummaryData$TissueType=="PIN",], aes(x=NextTo, y=MeanMeth)) + geom_jitter(position=position_jitter(0.15), aes(colour=NextTo))
+
+## The sample size for the previous two parameters seemed not very well distributed. May have more power if we just consider whether there was any cancer in the slide, which has a more even sample size across the two categories.
+ggplot(MethSummaryData[MethSummaryData$TissueType=="PIN",], aes(x=CAinSlide, y=MeanMeth)) + geom_jitter(position=position_jitter(0.15), aes(colour=CAinSlide))
+
+```
+
+Based on the last plot, it looks like the PIN lesions that have Cancer in the slide have a higher methylation distribution than the PIN lesions that do not have cancer in the slide. We can test this for significance:
+
+```{r}
+wilcox.test(MeanMeth ~ CAinSlide, data = MethSummaryData[MethSummaryData$TissueType=="PIN",]) #This is the mann-whitney U test
+
+kruskal.test(MeanMeth ~ CAinSlide, data = MethSummaryData[MethSummaryData$TissueType=="PIN",]) #Kruskal Wallis test of one way anova by ranks
+
+aov(MeanMeth ~ CAinSlide, data = MethSummaryData[MethSummaryData$TissueType=="PIN",])
+summary(aov(MeanMeth ~ CAinSlide, data = MethSummaryData[MethSummaryData$TissueType=="PIN",]))
+```
+
+So it looks like this is not significant either. Perhaps it is worth noting that there is a trend for this in a supplementary figure.
+
+9. Plot average methylation by each CpG across the four tissue types
+
+Create CpG by CpG heatmap
+
+First, create a dataframe matrix as follows:
+1. Each row is a patient
+2. Each column is a CpG
+3. Four separate clusters (normal, PIA, PIN, cancer) for the rows
+4. Each value is the average methylation across clones and tissues at a given CpG for a given tissue in a specific patient. Thus, the 
+
+Question: If a patient has two tissues, should those be 2 separate rows or a single row?
+
+```{r, eval = TRUE}
+library(ComplexHeatmap)
+library(circlize)
+
+# Summarize the Methylation Dataframe by averaging the methylation of clones for a given tissue. 
+CpGSummaryData <- methylationDataFrame %>% 
+  group_by(specimenID, TissueType, TissueDxNum) %>% # Group by patient, tissue type, and tissue ID
+  select(starts_with("CpG_")) %>% # Select all the CpG columns
+  summarise_all(mean, na.rm=TRUE)
+
+# Reorder columns to be CpG_1 to CpG_39 rather than 39 to 1.
+for (i in 39:1)
+{
+  CpGSummaryData <- CpGSummaryData %>%
+    relocate(paste("CpG_",i,sep = ""), .after = TissueDxNum)
+}
+
+CpGSummaryData <- as.data.frame(CpGSummaryData)
+
+CpGHeatmap <- CpGSummaryData %>%
+  select(-c(specimenID,TissueDxNum, TissueType))
+colnames(CpGHeatmap) <- gsub("CpG_","",colnames(CpGHeatmap))
+
+# Users should always use circlize::colorRamp2() function to generate the color mapping function in Heatmap().
+
+col_fun = colorRamp2(c(0,1), c("lightgray", "red"))
+
+heatmap_plot <- Heatmap(CpGHeatmap,
+        # Clustering
+        cluster_columns = FALSE,
+        cluster_row_slices = FALSE,
+        
+        # Split rows by tissue type
+        row_split = factor(CpGSummaryData$TissueType,levels = c("normal", "atrophy", "PIN", "cancer")),
+        
+        # Dendograms
+        show_row_dend = FALSE, show_column_dend = FALSE,
+        
+        # Titles
+        name = "Average Methylation",
+        row_title = c("Normal", "PIA", "PIN", "Cancer"),
+        row_title_gp = gpar(fontsize = 15, fontface = "bold"),
+        column_title = "CpG in GSTP1 Promoter", column_title_side = "bottom",
+        column_title_gp = gpar(fontsize = 20, fontface = "bold"),
+        column_names_gp = gpar(fontsize = 10),
+        
+        # Colors
+        col = col_fun
+        
+        # Graphic parameters for grid
+
+        )
+
+heatmap_plot
+
+pdf("../DNAMethylMap_Paper/heatmap.pdf")
+heatmap_plot
+dev.off()
+
+```
+
+Boxplot code for reference -- NOT USED
+```{r eval=FALSE, echo=FALSE}
+CpGSummaryData <- CpGSummaryData %>%
+  pivot_longer(-c(specimenID,TissueType,TissueDxNum),names_to = "CpG", values_to = "Methylation_Percent")
+
+plotMeanMeth <- ggplot(MethSummaryData, aes(x=TissueType, y=MeanMeth)) + 
+  scale_x_discrete(name = "Tissue Region Type",      labels=c("Normal","Atrophy","PIN","Cancer"), limits=c("normal","atrophy","PIN","cancer")) +
+  scale_y_continuous(name = "Average Methylation") +
+  stat_summary(fun.data = f, geom="boxplot", aes(color=TissueType, width=0.6)) +
+  geom_jitter(position=position_jitter(0.15), aes(shape=TissueType, fill=TissueType), colour="black", size=3, stroke=0.3) +
+  theme_classic() +
+  scale_shape_manual(values=c(21,22,23,24)) +
+  scale_color_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  scale_fill_manual(values=c("darkorange","maroon","seagreen","red2")) +
+  theme(legend.position="none") +
+  theme(axis.title.x = element_text(size=20, vjust=-3), axis.title.y = element_text(size=20, vjust=3), axis.text.x = element_text(size=14), axis.text.y = element_text(size=14), plot.margin = unit(c(1,3,1,3), "cm"))
+
+```
